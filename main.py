@@ -5,11 +5,12 @@ from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai import Agent, Tool
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
+
 import sqlite3
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Depends, Form, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, Form, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -223,6 +224,9 @@ model = GoogleModel('gemini-2.0-flash', provider=provider)
 
 app = FastAPI(title="Patient Management API")
 
+# Store message history in a dictionary, keyed by phone number
+message_histories = {}
+
 def create_agent():
     """Create and return the Agent instance."""
     return Agent(model=model, instrument=True, 
@@ -231,59 +235,29 @@ def create_agent():
                   "any operations. Ensure all required fields (name, age, gender) are provided and valid before " \
                   "inserting into the database. You can help with inserting, updating, deleting, and retrieving patient records.")
 
-# def create_agent():
-#     """Create and return the Agent instance."""
-#     return Agent(model=model, instrument=True,
-#                   tools=[insert_patient_validated, update_patient, delete_patient, get_patient, list_all_patients],
-#                   system_prompt="You are a medical assistant. Always validate patient data thoroughly before performing " \
-#                   "any operations. Ensure all required fields (name, age, gender) are provided and valid before " \
-#                   "inserting into the database. You can help with inserting, updating, deleting, and retrieving patient records.")
 
-
-# async def process_command(command: str):
-#     """Process the user command with the AI agent."""
-#     message_history = []
-#     result = await agent.run(command, message_history=message_history)
-#     return result.output
-
-# class Command(BaseModel):
-#     command: str
-
-# @app.post("/process_command")
-# async def process_command_endpoint(command_data: Command):
-#     """Endpoint to process commands."""
-#     try:
-#         result = await process_command(command_data.command)
-#         return JSONResponse({"result": result})
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
-
-# Twilio integration would typically involve handling incoming message webhooks.
-# This is a placeholder for where that logic would go.  You'd need to install the Twilio Python library.
-# from twilio.twiml.messaging_response import MessagingResponse
-#
-# @app.post("/twilio_webhook")
-# async def twilio_webhook(request: Request):
-#     """Twilio webhook endpoint."""
-#     form_data = await request.form()
-#     message_body = form_data['Body']
-#     # Process the message_body with the AI agent
-#     result = await process_command(message_body)
-#
-#     # Create a TwiML response
-#     twiml = MessagingResponse()
-#     twiml.message(result)
-#
-#     return Response(content=str(twiml), media_type="application/xml")
 
 @app.post("/chat")
 async def chat_endpoint(
     From: str = Form(...),
     Body: str = Form(...),
-    agent: Agent = Depends(create_agent)
+    #agent: Agent = Depends(create_agent) #Remove to avoid creating agent on every call
 ):
+    """Handles incoming Twilio messages and maintains conversation history."""
+    
+    # Get or create the message history for this phone number
+    if From not in message_histories:
+        message_histories[From] = []
+    message_history = message_histories[From]
+
+    agent = create_agent() # Create a new agent for each request.
+        
     try:
-        result = await agent.run(Body)
+        result = await agent.run(Body, message_history=message_history)
+
+        # Extend the message history with the new messages
+        message_history.extend(result.new_messages())
+            
         twiml = MessagingResponse()
         twiml.message(result.output)
         twiml_string = str(twiml)
@@ -300,6 +274,15 @@ async def chat_endpoint(
         logger.error(f"TwiML Error: {twiml_string} - Exception: {e}")
         return Response(content=twiml_string, media_type="application/xml",headers=headers)
 
+@app.post("/clear_history", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_history(From: str = Form(...)):
+    """Clears the conversation history for a given phone number."""
+    if From in message_histories:
+        del message_histories[From]
+        logger.info(f"Cleared history for {From}")
+    else:
+        logger.info(f"No history to clear for {From}")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 if __name__ == "__main__":
     import uvicorn
