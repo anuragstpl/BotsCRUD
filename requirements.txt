@@ -4,3 +4,4 @@ pydantic
 pydantic-ai
 python-dotenv
 sqlite3
+twilio
